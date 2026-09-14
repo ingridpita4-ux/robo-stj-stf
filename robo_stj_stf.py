@@ -153,7 +153,8 @@ COR_AZUL    = "#1C2B4A"
 
 
 def _card(item: dict, cor: str) -> str:
-    link = f'<br><a href="https://{item[\"url\"]}" style="color:{cor};font-size:12px;">Leia mais ›</a>' if item.get("url") else ""
+    url_val = item.get("url", "")
+    link = f'<br><a href="https://{url_val}" style="color:{cor};font-size:12px;">Leia mais ›</a>' if url_val else ""
     return f"""
     <div style="{CARD_AZUL if cor == COR_AZUL else CARD_VERDE};
                  padding:12px 14px;margin:8px 0;border-radius:4px;">
