@@ -13,9 +13,13 @@ from datetime import datetime, timedelta, timezone
 
 # ── Configurações ──────────────────────────────────────────────
 BREVO_API_KEY = os.environ["BREVO_API_KEY"]
-EMAIL_DESTINO = "ingridpita@hotmail.com"
-NOME_DESTINO  = "Ingrid Pita"
 MODO          = os.environ.get("MODO", "diario")   # "diario" ou "semanal"
+
+DESTINATARIOS = [
+    {"email": "ingridpita@hotmail.com",       "name": "Ingrid Pita"},
+    {"email": "equipe@ramaraladvogados.com",  "name": "Equipe RA"},
+]
+
 FUSO_FORTALEZA = timezone(timedelta(hours=-3))
 
 HEADERS = {
@@ -55,7 +59,6 @@ def buscar_duckduckgo(query: str) -> list[dict]:
 
 
 def buscar_pauta_stf_oficial(data_iso: str) -> list[dict]:
-    """Tenta buscar diretamente nas notícias do portal STF."""
     itens = []
     try:
         r = requests.get(
@@ -78,7 +81,6 @@ def buscar_pauta_stf_oficial(data_iso: str) -> list[dict]:
 
 
 def buscar_pauta_stj_oficial() -> list[dict]:
-    """Tenta buscar diretamente na página de pauta do STJ."""
     itens = []
     try:
         r = requests.get(
@@ -100,46 +102,34 @@ def buscar_pauta_stj_oficial() -> list[dict]:
 
 
 def coletar_conteudo(hoje: datetime) -> tuple[list, list]:
-    """Coleta pauta do STF e STJ com múltiplas fontes."""
     data_br = hoje.strftime("%d/%m/%Y")
-
-    # STF
     stf = buscar_pauta_stf_oficial(hoje.strftime("%Y-%m-%d"))
     if not stf:
         stf = buscar_duckduckgo(f"pauta STF julgamentos {data_br}")
     if not stf:
         stf = buscar_duckduckgo("pauta STF julgamentos hoje site:portal.stf.jus.br OR site:stf.jus.br")
-
-    # STJ
     stj = buscar_pauta_stj_oficial()
     if not stj:
         stj = buscar_duckduckgo(f"pauta STJ julgamentos {data_br}")
     if not stj:
         stj = buscar_duckduckgo("pauta STJ julgamentos hoje site:stj.jus.br")
-
     return stf[:5], stj[:5]
 
 
 def coletar_resumo_semanal(hoje: datetime) -> tuple[list, list]:
-    """Coleta os principais julgados da semana."""
     segunda = hoje - timedelta(days=hoje.weekday())
     data_ini = segunda.strftime("%d/%m")
     data_fim = hoje.strftime("%d/%m/%Y")
-
     stf = buscar_duckduckgo(
-        f"principais julgados decisões STF semana {data_ini} a {data_fim} "
-        "direito família sucessões"
+        f"principais julgados decisões STF semana {data_ini} a {data_fim} direito família sucessões"
     )
     stj = buscar_duckduckgo(
-        f"principais julgados decisões STJ semana {data_ini} a {data_fim} "
-        "direito família sucessões"
+        f"principais julgados decisões STJ semana {data_ini} a {data_fim} direito família sucessões"
     )
-
     if not stf:
         stf = buscar_duckduckgo(f"STF julgou decidiu semana {data_fim}")
     if not stj:
         stj = buscar_duckduckgo(f"STJ julgou decidiu semana {data_fim}")
-
     return stf[:5], stj[:5]
 
 
@@ -175,82 +165,56 @@ def _secao(titulo: str, icone: str, cor: str, itens: list, vazio: str) -> str:
 
 
 def html_diario(stf: list, stj: list, hoje: datetime) -> str:
-    data_br   = hoje.strftime("%d/%m/%Y")
+    data_br    = hoje.strftime("%d/%m/%Y")
     dia_semana = DIAS_PT[hoje.weekday()]
-
-    stf_html = _secao(
-        "STF — Supremo Tribunal Federal", "🏛️", COR_AZUL, stf,
-        "Nenhuma pauta localizada para hoje — pode ser dia sem sessão ou a pauta ainda não foi publicada."
-    )
-    stj_html = _secao(
-        "STJ — Superior Tribunal de Justiça", "⚖️", COR_VERDE, stj,
-        "Nenhuma pauta localizada para hoje — pode ser dia sem sessão ou a pauta ainda não foi publicada."
-    )
-
+    stf_html = _secao("STF — Supremo Tribunal Federal", "🏛️", COR_AZUL, stf,
+        "Nenhuma pauta localizada para hoje — pode ser dia sem sessão ou a pauta ainda não foi publicada.")
+    stj_html = _secao("STJ — Superior Tribunal de Justiça", "⚖️", COR_VERDE, stj,
+        "Nenhuma pauta localizada para hoje — pode ser dia sem sessão ou a pauta ainda não foi publicada.")
     return f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:660px;
-                        margin:0 auto;color:#333;background:#fff;">
-    <!-- Cabeçalho -->
+    <html><body style="font-family:Arial,sans-serif;max-width:660px;margin:0 auto;color:#333;background:#fff;">
     <div style="background:{COR_AZUL};padding:22px 24px;border-radius:8px 8px 0 0;">
       <h2 style="color:#fff;margin:0;font-size:20px;">⚖️ Pauta STJ/STF</h2>
-      <p style="color:#aabbcc;margin:4px 0 0;font-size:13px;">
-        {dia_semana}, {data_br}
-      </p>
+      <p style="color:#aabbcc;margin:4px 0 0;font-size:13px;">{dia_semana}, {data_br}</p>
     </div>
-    <!-- Corpo -->
-    <div style="background:#f9f9fb;padding:20px 24px;
-                border:1px solid #dde;border-radius:0 0 8px 8px;">
+    <div style="background:#f9f9fb;padding:20px 24px;border:1px solid #dde;border-radius:0 0 8px 8px;">
       {stf_html}
       {stj_html}
-      <!-- Dica família/sucessões -->
-      <div style="background:#fff8e1;border:1px solid #f0c040;padding:12px 14px;
-                  border-radius:6px;margin-top:24px;font-size:13px;">
+      <div style="background:#fff8e1;border:1px solid #f0c040;padding:12px 14px;border-radius:6px;margin-top:24px;font-size:13px;">
         <strong>💡 Fique de olho:</strong> nos resultados acima, busque processos
         envolvendo <em>guarda, alimentos, divórcio, inventário, herança, adoção
-        ou responsabilidade civil</em> — temas relevantes para Direito de Família
-        e Sucessões.
+        ou responsabilidade civil</em> — temas relevantes para Direito de Família e Sucessões.
       </div>
-      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
-                padding-top:12px;margin-top:20px;">
-        Robô Jurídico STJ/STF • {data_br} • {EMAIL_DESTINO}
+      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;padding-top:12px;margin-top:20px;">
+        Robô Jurídico STJ/STF • {data_br}
       </p>
     </div>
     </body></html>"""
 
 
 def html_semanal(stf: list, stj: list, hoje: datetime) -> str:
-    segunda   = hoje - timedelta(days=hoje.weekday())
-    periodo   = f"{segunda.strftime('%d/%m')} a {hoje.strftime('%d/%m/%Y')}"
-
-    stf_html = _secao(
-        "STF — Destaques da semana", "🏛️", COR_AZUL, stf,
-        "Nenhum destaque localizado para esta semana."
-    )
-    stj_html = _secao(
-        "STJ — Destaques da semana", "⚖️", COR_VERDE, stj,
-        "Nenhum destaque localizado para esta semana."
-    )
-
+    segunda = hoje - timedelta(days=hoje.weekday())
+    periodo = f"{segunda.strftime('%d/%m')} a {hoje.strftime('%d/%m/%Y')}"
+    stf_html = _secao("STF — Destaques da semana", "🏛️", COR_AZUL, stf,
+        "Nenhum destaque localizado para esta semana.")
+    stj_html = _secao("STJ — Destaques da semana", "⚖️", COR_VERDE, stj,
+        "Nenhum destaque localizado para esta semana.")
     return f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:660px;
-                        margin:0 auto;color:#333;background:#fff;">
+    <html><body style="font-family:Arial,sans-serif;max-width:660px;margin:0 auto;color:#333;background:#fff;">
     <div style="background:{COR_AZUL};padding:22px 24px;border-radius:8px 8px 0 0;">
       <h2 style="color:#fff;margin:0;font-size:20px;">📊 Resumo Semanal STJ/STF</h2>
       <p style="color:#aabbcc;margin:4px 0 0;font-size:13px;">Semana de {periodo}</p>
     </div>
-    <div style="background:#f9f9fb;padding:20px 24px;
-                border:1px solid #dde;border-radius:0 0 8px 8px;">
+    <div style="background:#f9f9fb;padding:20px 24px;border:1px solid #dde;border-radius:0 0 8px 8px;">
       {stf_html}
       {stj_html}
-      <div style="background:#e8f5e9;border:1px solid #81c784;padding:12px 14px;
-                  border-radius:6px;margin-top:24px;font-size:13px;">
+      <div style="background:#e8f5e9;border:1px solid #81c784;padding:12px 14px;border-radius:6px;margin-top:24px;font-size:13px;">
         <strong>🗂️ Dica semanal:</strong> se algum julgado acima impactar seu
         escritório, o início da próxima semana é o momento ideal para
         informar clientes e atualizar estratégias processuais.
       </div>
-      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
-                padding-top:12px;margin-top:20px;">
-        Robô Jurídico STJ/STF • Resumo semanal • {EMAIL_DESTINO}
+      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;padding-top:12px;margin-top:20px;">
+        Robô Jurídico STJ/STF • Resumo semanal
       </p>
     </div>
     </body></html>"""
@@ -260,8 +224,8 @@ def html_semanal(stf: list, stj: list, hoje: datetime) -> str:
 
 def enviar_email(assunto: str, html: str) -> bool:
     payload = {
-        "sender":      {"name": "Robô Jurídico STJ/STF", "email": EMAIL_DESTINO},
-        "to":          [{"email": EMAIL_DESTINO, "name": NOME_DESTINO}],
+        "sender":      {"name": "Robô Jurídico STJ/STF", "email": "ingridpita@hotmail.com"},
+        "to":          DESTINATARIOS,
         "subject":     assunto,
         "htmlContent": html,
     }
