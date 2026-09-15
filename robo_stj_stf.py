@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
 Robô Jurídico STJ/STF
-Busca a pauta diária e resumo semanal dos tribunais superiores
-e envia por e-mail via Brevo API.
+Busca a pauta diária e resumo semanal dos tribunais superiores,
+processa via Claude API e envia por e-mail via Brevo.
 """
 
 import os
+import re
 import json
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
 # ── Configurações ──────────────────────────────────────────────
-BREVO_API_KEY = os.environ["BREVO_API_KEY"]
-MODO          = os.environ.get("MODO", "diario")   # "diario" ou "semanal"
+BREVO_API_KEY     = os.environ["BREVO_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+MODO              = os.environ.get("MODO", "diario")   # "diario" ou "semanal"
 
 DESTINATARIOS = [
     {"email": "ingridpita@hotmail.com",        "name": "Ingrid Pita"},
@@ -33,19 +35,20 @@ HEADERS = {
 DIAS_PT = ["Segunda-feira", "Terça-feira", "Quarta-feira",
            "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
 
-# ── Busca de conteúdo ──────────────────────────────────────────
+
+# ── Busca e extração de texto bruto ────────────────────────────
 
 def buscar_duckduckgo(query: str) -> list[dict]:
-    """Busca notícias no DuckDuckGo HTML (sem API key)."""
+    """Busca notícias no DuckDuckGo HTML."""
     resultados = []
     try:
         url = "https://html.duckduckgo.com/html/"
         r = requests.post(url, data={"q": query}, headers=HEADERS, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
-        for item in soup.select(".result__body")[:6]:
-            titulo  = item.select_one(".result__title")
-            trecho  = item.select_one(".result__snippet")
-            link    = item.select_one("a.result__url")
+        for item in soup.select(".result__body")[:8]:
+            titulo = item.select_one(".result__title")
+            trecho = item.select_one(".result__snippet")
+            link   = item.select_one("a.result__url")
             if titulo and trecho:
                 resultados.append({
                     "titulo": titulo.get_text(strip=True),
@@ -57,110 +60,266 @@ def buscar_duckduckgo(query: str) -> list[dict]:
     return resultados
 
 
-def buscar_pauta_stf_oficial(data_iso: str) -> list[dict]:
-    """Tenta buscar diretamente nas notícias do portal STF."""
-    itens = []
+def extrair_texto_pagina(url: str, limite: int = 4000) -> str:
+    """Busca uma URL e retorna o texto limpo (sem scripts/nav/footer)."""
     try:
-        r = requests.get(
-            "https://portal.stf.jus.br/noticias/listarNoticias.asp?tipo=pauta",
-            headers=HEADERS, timeout=15
-        )
+        url_completo = url if url.startswith("http") else f"https://{url}"
+        r = requests.get(url_completo, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
-        for el in soup.select("li, article, .card-news")[:8]:
-            texto = el.get_text(separator=" ", strip=True)
-            if len(texto) > 40:
-                link_el = el.find("a")
-                itens.append({
-                    "titulo": texto[:120],
-                    "trecho": texto[:250],
-                    "url":    "portal.stf.jus.br" + (link_el["href"] if link_el and link_el.get("href","").startswith("/") else ""),
-                })
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
+            tag.decompose()
+        return soup.get_text(separator="\n", strip=True)[:limite]
     except Exception as e:
-        print(f"[STF oficial] erro: {e}")
-    return itens
+        print(f"[extrair_texto] erro em {url}: {e}")
+        return ""
 
 
-def buscar_pauta_stj_oficial() -> list[dict]:
-    """Tenta buscar diretamente na página de pauta do STJ."""
-    itens = []
+def coletar_fontes_stf() -> str:
+    """Coleta texto bruto de múltiplas fontes do STF."""
+    blocos = []
+
+    # 1. Informativos STF
+    t = extrair_texto_pagina("https://portal.stf.jus.br/informativos/")
+    if t:
+        blocos.append(f"[STF — Informativos]\n{t}")
+
+    # 2. Pautas STF
+    t = extrair_texto_pagina("https://portal.stf.jus.br/pautas/")
+    if t:
+        blocos.append(f"[STF — Pautas]\n{t}")
+
+    # 3. Notícias STF
+    t = extrair_texto_pagina(
+        "https://portal.stf.jus.br/noticias/listarNoticias.asp?tipo=pauta"
+    )
+    if t:
+        blocos.append(f"[STF — Notícias/Pauta]\n{t}")
+
+    # 4. DuckDuckGo → páginas oficiais e conjur
+    resultados = buscar_duckduckgo(
+        "STF julgamentos pauta decisão hoje site:portal.stf.jus.br OR site:conjur.com.br"
+    )
+    for r in resultados[:3]:
+        url = r.get("url", "")
+        if url:
+            t = extrair_texto_pagina(url, 3000)
+            if t:
+                blocos.append(f"[{url}]\n{t}")
+
+    return "\n\n---\n\n".join(blocos)
+
+
+def coletar_fontes_stj() -> str:
+    """Coleta texto bruto de múltiplas fontes do STJ."""
+    blocos = []
+
+    # 1. Informativo STJ
+    t = extrair_texto_pagina(
+        "https://www.stj.jus.br/sites/portalp/Paginas/Comunicacao/"
+        "Informativos-de-Jurisprudencia.aspx"
+    )
+    if t:
+        blocos.append(f"[STJ — Informativo de Jurisprudência]\n{t}")
+
+    # 2. Notícias STJ
+    t = extrair_texto_pagina(
+        "https://www.stj.jus.br/sites/portalp/Paginas/Comunicacao/Noticias.aspx"
+    )
+    if t:
+        blocos.append(f"[STJ — Notícias]\n{t}")
+
+    # 3. Temas repetitivos
+    t = extrair_texto_pagina(
+        "https://processo.stj.jus.br/repetitivos/temas_repetitivos/pesquisa.jsp"
+    )
+    if t:
+        blocos.append(f"[STJ — Temas Repetitivos]\n{t}")
+
+    # 4. DuckDuckGo → fontes especializadas
+    resultados = buscar_duckduckgo(
+        "STJ julgamentos pauta decisão hoje site:stj.jus.br OR site:conjur.com.br"
+    )
+    for r in resultados[:3]:
+        url = r.get("url", "")
+        if url:
+            t = extrair_texto_pagina(url, 3000)
+            if t:
+                blocos.append(f"[{url}]\n{t}")
+
+    return "\n\n---\n\n".join(blocos)
+
+
+# ── Processamento com Claude API ───────────────────────────────
+
+def _chamar_claude(prompt: str) -> list[dict]:
+    """Chama a API do Claude e retorna lista de dicts extraídos do JSON."""
     try:
-        r = requests.get(
-            "https://www.stj.jus.br/sites/portalp/Paginas/Comunicacao/Noticias/Pauta.aspx",
-            headers=HEADERS, timeout=15
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 2500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=50,
         )
-        soup = BeautifulSoup(r.text, "html.parser")
-        for el in soup.select(".ms-rtestate-field p, .noticias-lista li, article")[:8]:
-            texto = el.get_text(separator=" ", strip=True)
-            if len(texto) > 40:
-                itens.append({
-                    "titulo": texto[:120],
-                    "trecho": texto[:250],
-                    "url":    "www.stj.jus.br",
-                })
+        if resp.status_code != 200:
+            print(f"[Claude API] status {resp.status_code}: {resp.text[:200]}")
+            return []
+        texto = resp.json()["content"][0]["text"].strip()
+        match = re.search(r'\[.*\]', texto, re.DOTALL)
+        if match:
+            return json.loads(match.group())
     except Exception as e:
-        print(f"[STJ oficial] erro: {e}")
-    return itens
+        print(f"[Claude API] erro: {e}")
+    return []
 
+
+def processar_diario(texto_stf: str, texto_stj: str, hoje: datetime) -> tuple[list, list]:
+    """Extrai pauta do dia via Claude."""
+    if not ANTHROPIC_API_KEY:
+        return [], []
+
+    data_br = hoje.strftime("%d/%m/%Y")
+    dia     = DIAS_PT[hoje.weekday()]
+
+    instrucao = f"""Você é um assessor jurídico sênior especializado em STJ e STF.
+
+Analise o texto abaixo e extraia as informações sobre a PAUTA e JULGAMENTOS de {dia}, {data_br}.
+
+Para cada processo, afetação ou decisão encontrada, crie um objeto JSON com:
+- "titulo": descrição concisa (ex: "Tema 1464 — REsp 2.255.394/MA" ou "ADI 7.000 — Relatora Min. Rosa Weber")
+- "trecho": resumo estruturado contendo: seção/turma, data da sessão, ministro relator, questão jurídica central e resultado/decisão
+- "url": URL da fonte (deixe "" se não houver)
+
+Se não houver julgamentos identificáveis para a data, retorne [].
+Retorne APENAS o array JSON, sem markdown nem explicações."""
+
+    stf = _chamar_claude(f"{instrucao}\n\nCONTEÚDO STF:\n{texto_stf[:6500]}")
+    stj = _chamar_claude(f"{instrucao}\n\nCONTEÚDO STJ:\n{texto_stj[:6500]}")
+    return stf, stj
+
+
+def processar_semanal(texto_stf: str, texto_stj: str, hoje: datetime) -> tuple[list, list]:
+    """Extrai destaques da semana + síntese analítica via Claude."""
+    if not ANTHROPIC_API_KEY:
+        return [], []
+
+    segunda  = hoje - timedelta(days=hoje.weekday())
+    periodo  = f"{segunda.strftime('%d/%m')} a {hoje.strftime('%d/%m/%Y')}"
+
+    instrucao = f"""Vocà é um assessor jurídico sênior especializado em STJ e STF.
+
+Analise o texto abaixo e extraia os PRINCIPAIS JULGAMENTOS E DECISÕES da semana de {periodo}.
+
+Para cada decisão relevante, crie um objeto JSON:
+- "titulo": identificação do caso (ex: "Tema 1466 — REsp 2.258.565/SP" ou "RE 1.396.490 — Repercussão Geral")
+- "trecho": resumo com seção/turma, data, relator (Ministro), questão jurídica, resultado/decisão e impacto prático
+- "url": URL da fonte (deixe "" se não houver)
+
+Ao final, adicione OBRIGATORIAMENTE um objeto de síntese:
+- "titulo": "📊 Síntese Analítica da Semana"
+- "trecho": análise de como os temas julgados se interligam, o que fecham na jurisprudência e qual o impacto estratégico para a advocacia
+- "url": ""
+
+Retorne APENAS o array JSON, sem markdown nem explicações."""
+
+    stf = _chamar_claude(f"{instrucao}\n\nCONTEÚDO STF:\n{texto_stf[:6500]}")
+    stj = _chamar_claude(f"{instrucao}\n\nCONTEÚDO STJ:\n{texto_stj[:6500]}")
+    return stf, stj
+
+
+# ── Coleta principal ────────────────────────────────────────────
 
 def coletar_conteudo(hoje: datetime) -> tuple[list, list]:
-    """Coleta pauta do STF e STJ com múltiplas fontes."""
+    """Pauta diária: tenta Claude API, cai no DuckDuckGo se falhar."""
     data_br = hoje.strftime("%d/%m/%Y")
+    print("Coletando fontes...")
 
-    # STF
-    stf = buscar_pauta_stf_oficial(hoje.strftime("%Y-%m-%d"))
-    if not stf:
-        stf = buscar_duckduckgo(f"pauta STF julgamentos {data_br}")
-    if not stf:
-        stf = buscar_duckduckgo("pauta STF julgamentos hoje site:portal.stf.jus.br OR site:stf.jus.br")
+    texto_stf = coletar_fontes_stf()
+    texto_stj = coletar_fontes_stj()
 
-    # STJ
-    stj = buscar_pauta_stj_oficial()
+    stf, stj = processar_diario(texto_stf, texto_stj, hoje)
+
+    if not stf:
+        stf = buscar_duckduckgo(f"pauta STF julgamentos {data_br}")[:5]
     if not stj:
-        stj = buscar_duckduckgo(f"pauta STJ julgamentos {data_br}")
-    if not stj:
-        stj = buscar_duckduckgo("pauta STJ julgamentos hoje site:stj.jus.br")
+        stj = buscar_duckduckgo(f"pauta STJ julgamentos {data_br}")[:5]
 
     return stf[:5], stj[:5]
 
 
 def coletar_resumo_semanal(hoje: datetime) -> tuple[list, list]:
-    """Coleta os principais julgados da semana."""
-    segunda = hoje - timedelta(days=hoje.weekday())
+    """Resumo semanal: tenta Claude API, cai no DuckDuckGo se falhar."""
+    segunda  = hoje - timedelta(days=hoje.weekday())
     data_ini = segunda.strftime("%d/%m")
     data_fim = hoje.strftime("%d/%m/%Y")
+    print("Coletando fontes para resumo semanal...")
 
-    stf = buscar_duckduckgo(
-        f"principais julgados decisões STF semana {data_ini} a {data_fim}"
-    )
-    stj = buscar_duckduckgo(
-        f"principais julgados decisões STJ semana {data_ini} a {data_fim}"
-    )
+    texto_stf = coletar_fontes_stf()
+    # Complementa com busca semanal
+    for r in buscar_duckduckgo(f"STF principais decisões semana {data_ini} a {data_fim}")[:2]:
+        t = extrair_texto_pagina(r.get("url", ""), 3000)
+        if t:
+            texto_stf += f"\n\n---\n\n{t}"
+
+    texto_stj = coletar_fontes_stj()
+    for r in buscar_duckduckgo(f"STJ principais decisões semana {data_ini} a {data_fim}")[:2]:
+        t = extrair_texto_pagina(r.get("url", ""), 3000)
+        if t:
+            texto_stj += f"\n\n---\n\n{t}"
+
+    stf, stj = processar_semanal(texto_stf, texto_stj, hoje)
 
     if not stf:
-        stf = buscar_duckduckgo(f"STF julgou decidiu semana {data_fim}")
+        stf = buscar_duckduckgo(f"STF julgou decidiu semana {data_fim}")[:5]
     if not stj:
-        stj = buscar_duckduckgo(f"STJ julgou decidiu semana {data_fim}")
+        stj = buscar_duckduckgo(f"STJ julgou decidiu semana {data_fim}")[:5]
 
-    return stf[:5], stj[:5]
+    return stf[:6], stj[:6]
 
 
 # ── Formatação do e-mail ───────────────────────────────────────
 
-CARD_VERDE  = "background:#f0fff4;border-left:3px solid #2B6A4A"
-CARD_AZUL   = "background:#f0f4ff;border-left:3px solid #1C2B4A"
-COR_VERDE   = "#2B6A4A"
-COR_AZUL    = "#1C2B4A"
+CARD_VERDE   = "background:#f0fff4;border-left:3px solid #2B6A4A"
+CARD_AZUL    = "background:#f0f4ff;border-left:3px solid #1C2B4A"
+CARD_SINTESE = "background:#fffbea;border-left:4px solid #c9a000"
+COR_VERDE    = "#2B6A4A"
+COR_AZUL     = "#1C2B4A"
+COR_OURO     = "#7a5f00"
 
 
 def _card(item: dict, cor: str) -> str:
     url_val = item.get("url", "")
-    link = f'<br><a href="https://{url_val}" style="color:{cor};font-size:12px;">Leia mais ›</a>' if url_val else ""
+    titulo  = item.get("titulo", "")
+    trecho  = item.get("trecho", "")
+
+    # Card especial para síntese analítica
+    if "Síntese" in titulo or "📊" in titulo:
+        link = ""
+        return f"""
+    <div style="{CARD_SINTESE};padding:14px 16px;margin:12px 0;border-radius:6px;">
+      <strong style="font-size:14px;color:{COR_OURO};">{titulo}</strong><br>
+      <span style="color:#555;font-size:13px;line-height:1.7;display:block;margin-top:6px;">
+        {trecho.replace(chr(10), "<br>")}
+      </span>
+    </div>"""
+
+    link = (
+        f'<br><a href="https://{url_val}" style="color:{cor};font-size:12px;">Leia mais ›</a>'
+        if url_val else ""
+    )
+    estilo_card = CARD_AZUL if cor == COR_AZUL else CARD_VERDE
     return f"""
-    <div style="{CARD_AZUL if cor == COR_AZUL else CARD_VERDE};
-                 padding:12px 14px;margin:8px 0;border-radius:4px;">
-      <strong style="font-size:14px;">{item.get('titulo','')}</strong><br>
-      <span style="color:#555;font-size:13px;line-height:1.5;">
-        {item.get('trecho','')}
+    <div style="{estilo_card};padding:13px 15px;margin:8px 0;border-radius:4px;">
+      <strong style="font-size:14px;color:{cor};">{titulo}</strong><br>
+      <span style="color:#444;font-size:13px;line-height:1.65;display:block;margin-top:5px;">
+        {trecho.replace(chr(10), "<br>")}
       </span>{link}
     </div>"""
 
@@ -177,7 +336,7 @@ def _secao(titulo: str, icone: str, cor: str, itens: list, vazio: str) -> str:
 
 
 def html_diario(stf: list, stj: list, hoje: datetime) -> str:
-    data_br   = hoje.strftime("%d/%m/%Y")
+    data_br    = hoje.strftime("%d/%m/%Y")
     dia_semana = DIAS_PT[hoje.weekday()]
 
     stf_html = _secao(
@@ -188,40 +347,39 @@ def html_diario(stf: list, stj: list, hoje: datetime) -> str:
         "STJ — Superior Tribunal de Justiça", "⚖️", COR_VERDE, stj,
         "Nenhuma pauta localizada para hoje — pode ser dia sem sessão ou a pauta ainda não foi publicada."
     )
+    fonte = "Claude AI + portais oficiais" if ANTHROPIC_API_KEY else "Portais oficiais + DuckDuckGo"
 
     return f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:660px;
+    <html><body style="font-family:Arial,sans-serif;max-width:680px;
                         margin:0 auto;color:#333;background:#fff;">
-    <!-- Cabeçalho -->
     <div style="background:{COR_AZUL};padding:22px 24px;border-radius:8px 8px 0 0;">
       <h2 style="color:#fff;margin:0;font-size:20px;">⚖️ Pauta STJ/STF</h2>
       <p style="color:#aabbcc;margin:4px 0 0;font-size:13px;">
         {dia_semana}, {data_br}
       </p>
     </div>
-    <!-- Corpo -->
     <div style="background:#f9f9fb;padding:20px 24px;
                 border:1px solid #dde;border-radius:0 0 8px 8px;">
       {stf_html}
       {stj_html}
-      <!-- Dica geral -->
       <div style="background:#fff8e1;border:1px solid #f0c040;padding:12px 14px;
                   border-radius:6px;margin-top:24px;font-size:13px;">
         <strong>💡 Fique de olho:</strong> identifique nos resultados acima
         quais julgamentos podem impactar seus processos e clientes —
         atualize suas estratégias conforme necessário.
       </div>
-      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
+      <p style="color:#bbb;font-size:11px;border-top:1px solid #eee;
                 padding-top:12px;margin-top:20px;">
-        Robô Jurídico STJ/STF • {data_br}
+        Robô Jurídico STJ/STF • {data_br} • Fonte: {fonte}
       </p>
     </div>
     </body></html>"""
 
 
 def html_semanal(stf: list, stj: list, hoje: datetime) -> str:
-    segunda   = hoje - timedelta(days=hoje.weekday())
-    periodo   = f"{segunda.strftime('%d/%m')} a {hoje.strftime('%d/%m/%Y')}"
+    segunda  = hoje - timedelta(days=hoje.weekday())
+    periodo  = f"{segunda.strftime('%d/%m')} a {hoje.strftime('%d/%m/%Y')}"
+    fonte    = "Claude AI + portais oficiais" if ANTHROPIC_API_KEY else "Portais oficiais + DuckDuckGo"
 
     stf_html = _secao(
         "STF — Destaques da semana", "🏛️", COR_AZUL, stf,
@@ -233,7 +391,7 @@ def html_semanal(stf: list, stj: list, hoje: datetime) -> str:
     )
 
     return f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:660px;
+    <html><body style="font-family:Arial,sans-serif;max-width:680px;
                         margin:0 auto;color:#333;background:#fff;">
     <div style="background:{COR_AZUL};padding:22px 24px;border-radius:8px 8px 0 0;">
       <h2 style="color:#fff;margin:0;font-size:20px;">📊 Resumo Semanal STJ/STF</h2>
@@ -249,9 +407,9 @@ def html_semanal(stf: list, stj: list, hoje: datetime) -> str:
         seus clientes ou processos, o início da próxima semana é o momento
         ideal para informar e atualizar estratégias.
       </div>
-      <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
+      <p style="color:#bbb;font-size:11px;border-top:1px solid #eee;
                 padding-top:12px;margin-top:20px;">
-        Robô Jurídico STJ/STF • Resumo semanal
+        Robô Jurídico STJ/STF • Resumo semanal • Fonte: {fonte}
       </p>
     </div>
     </body></html>"""
@@ -281,7 +439,8 @@ def enviar_email(assunto: str, html: str) -> bool:
 
 def main():
     hoje = datetime.now(FUSO_FORTALEZA)
-    print(f"Robô iniciado — {hoje.strftime('%d/%m/%Y %H:%M')} — modo: {MODO}")
+    modo_ia = "com Claude AI" if ANTHROPIC_API_KEY else "sem Claude AI (fallback)"
+    print(f"Robô iniciado — {hoje.strftime('%d/%m/%Y %H:%M')} — modo: {MODO} — {modo_ia}")
 
     if MODO == "semanal":
         stf, stj = coletar_resumo_semanal(hoje)
