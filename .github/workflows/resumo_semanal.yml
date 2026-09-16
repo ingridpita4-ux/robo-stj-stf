@@ -15,5 +15,6 @@ jobs:
       - name: Enviar resumo semanal
         env:
           BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MODO: semanal
         run: python robo_stj_stf.py
